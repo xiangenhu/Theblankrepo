@@ -5,6 +5,7 @@ npm-debug.log
 !.env.example
 .git
 .gitignore
+.claude
 docs
 design
 *.md
