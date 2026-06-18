@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" type="image/png" href="https://z-cdn.chatglm.cn/z-ai/static/logo.svg" />
+  <title>AssessBank — AI Assessment Item Generator</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --border: #e6e9ee;
+      --text: #1a1f26;
+      --muted: #6b7280;
+      --accent: #1976d2;
+      --accent-dark: #1257a0;
+      --accent-soft: #e8f1fc;
+      --green: #1a8754;
+      --green-soft: #e6f4ec;
+      --amber: #b7791f;
+      --amber-soft: #fdf3e1;
+      --red: #c0392b;
+      --red-soft: #fceae8;
+      --shadow: 0 1px 3px rgba(16, 24, 40, 0.06), 0 1px 2px rgba(16, 24, 40, 0.04);
+      --shadow-lg: 0 10px 30px rgba(16, 24, 40, 0.08);
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+
+    /* Header */
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(255,255,255,0.85);
+      backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .header-inner {
+      max-width: 1080px; margin: 0 auto; padding: 14px 24px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .logo {
+      width: 34px; height: 34px; border-radius: 9px;
+      background: linear-gradient(135deg, var(--accent), #4ea3f0);
+      display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 18px;
+      box-shadow: var(--shadow);
+    }
+    .brand { font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+    .brand span { color: var(--accent); }
+    .tagline { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+    /* Layout */
+    main { max-width: 1080px; margin: 0 auto; padding: 28px 24px 64px; }
+    .grid { display: grid; grid-template-columns: 380px 1fr; gap: 24px; align-items: start; }
+    @media (max-width: 880px) { .grid { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+    .card h2 { margin: 0 0 4px; font-size: 16px; }
+    .card .hint { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+
+    label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+    input, select, textarea {
+      width: 100%; padding: 11px 13px; font-size: 14px; color: var(--text);
+      background: #fbfcfd; border: 1px solid var(--border); border-radius: 10px;
+      outline: none; transition: border-color .15s, box-shadow .15s; font-family: inherit;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; margin-top: 20px; padding: 12px 16px;
+      font-size: 14px; font-weight: 600; color: #fff;
+      background: var(--accent); border: none; border-radius: 10px; cursor: pointer;
+      transition: background .15s, transform .05s;
+    }
+    .btn:hover { background: var(--accent-dark); }
+    .btn:active { transform: translateY(1px); }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+    .btn.secondary {
+      background: var(--accent-soft); color: var(--accent-dark); margin-top: 0;
+    }
+    .btn.secondary:hover { background: #d7e8fa; }
+    .btn.ghost {
+      width: auto; background: transparent; color: var(--accent); border: 1px solid var(--border);
+      padding: 8px 14px; margin-top: 0; font-size: 13px;
+    }
+    .btn.ghost:hover { background: var(--accent-soft); }
+
+    /* Results */
+    .results-head {
+      display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+    }
+    .results-head h2 { margin: 0; font-size: 16px; }
+    .results-head .count { color: var(--muted); font-size: 13px; }
+    .results-actions { margin-left: auto; display: flex; gap: 8px; }
+
+    .item {
+      border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px;
+      background: #fff;
+    }
+    .item-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .item-num {
+      width: 24px; height: 24px; flex: none; border-radius: 7px; background: var(--accent-soft);
+      color: var(--accent-dark); font-weight: 700; font-size: 12px; display: grid; place-items: center;
+    }
+    .badge {
+      font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; text-transform: capitalize;
+    }
+    .badge.easy { background: var(--green-soft); color: var(--green); }
+    .badge.medium { background: var(--amber-soft); color: var(--amber); }
+    .badge.hard { background: var(--red-soft); color: var(--red); }
+    .badge.type { background: #eef1f5; color: var(--muted); }
+    .badge.std { background: var(--accent-soft); color: var(--accent-dark); }
+    .item-stem { font-weight: 600; margin: 0 0 10px; }
+    .options { list-style: none; margin: 0 0 10px; padding: 0; }
+    .options li {
+      padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; margin-bottom: 6px;
+      font-size: 14px; display: flex; gap: 8px;
+    }
+    .options li.correct { background: var(--green-soft); border-color: #bfe5cf; }
+    .options li.correct::after { content: "✓"; margin-left: auto; color: var(--green); font-weight: 800; }
+    .answer-key {
+      font-size: 13.5px; background: #f8fafc; border: 1px dashed var(--border);
+      border-radius: 9px; padding: 10px 12px; margin-top: 8px;
+    }
+    .answer-key b { color: var(--green); }
+    .rationale { color: var(--muted); font-size: 13px; margin-top: 6px; }
+
+    /* Saved banks */
+    .bank {
+      display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+      border: 1px solid var(--border); border-radius: 11px; margin-bottom: 10px; background: #fff;
+    }
+    .bank-icon {
+      width: 36px; height: 36px; flex: none; border-radius: 9px; background: var(--accent-soft);
+      display: grid; place-items: center; font-size: 18px;
+    }
+    .bank-info { min-width: 0; }
+    .bank-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bank-meta { color: var(--muted); font-size: 12px; }
+    .bank .btn.ghost { margin-left: auto; }
+
+    .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 28px 8px; }
+
+    /* States */
+    .placeholder {
+      display: grid; place-items: center; text-align: center; min-height: 320px; color: var(--muted);
+    }
+    .placeholder .big { font-size: 44px; margin-bottom: 8px; }
+    .spinner {
+      width: 18px; height: 18px; border: 2.5px solid rgba(255,255,255,.45);
+      border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: #1a1f26; color: #fff; padding: 12px 20px; border-radius: 10px;
+      font-size: 14px; box-shadow: var(--shadow-lg); opacity: 0; pointer-events: none;
+      transition: opacity .25s, transform .25s; z-index: 50;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+    .toast.error { background: var(--red); }
+    .alert {
+      background: var(--red-soft); color: var(--red); border: 1px solid #f3c9c3;
+      border-radius: 10px; padding: 12px 14px; font-size: 13.5px; margin-bottom: 14px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="logo">A</div>
+      <div class="brand">Assess<span>Bank</span></div>
+      <div class="tagline">Standards-aligned items, generated by AI</div>
+    </div>
+  </header>
+
+  <main>
+    <div class="grid">
+      <!-- Generator form -->
+      <section>
+        <div class="card">
+          <h2>Generate items</h2>
+          <p class="hint">Describe what you want to assess. The AI returns aligned items with answer keys and difficulty tags.</p>
+
+          <form id="genForm">
+            <label for="topic">Topic</label>
+            <input id="topic" name="topic" placeholder="e.g. Photosynthesis in plants" required />
+
+            <label for="standard">Target standard</label>
+            <input id="standard" name="standard" placeholder="e.g. NGSS MS-LS1-6" />
+
+            <label for="provider">AI provider</label>
+            <select id="provider" name="provider">
+              <option value="">Loading…</option>
+            </select>
+
+            <div class="row">
+              <div>
+                <label for="itemType">Item type</label>
+                <select id="itemType" name="itemType">
+                  <option>multiple choice</option>
+                  <option>true/false</option>
+                  <option>short answer</option>
+                  <option>essay</option>
+                </select>
+              </div>
+              <div>
+                <label for="count">Number of items</label>
+                <select id="count" name="count">
+                  <option>3</option>
+                  <option selected>5</option>
+                  <option>8</option>
+                  <option>10</option>
+                </select>
+              </div>
+            </div>
+
+            <button class="btn" id="genBtn" type="submit">
+              <span id="genLabel">Generate items</span>
+            </button>
+          </form>
+        </div>
+
+        <!-- Saved banks -->
+        <div class="card" style="margin-top:24px;">
+          <div class="results-head">
+            <h2>Saved banks</h2>
+            <button class="btn ghost" id="refreshBanks" type="button">Refresh</button>
+          </div>
+          <div id="banksList"><div class="empty">No saved banks yet.</div></div>
+        </div>
+      </section>
+
+      <!-- Results -->
+      <section>
+        <div class="card">
+          <div class="results-head">
+            <h2>Results</h2>
+            <span class="count" id="resultCount"></span>
+            <div class="results-actions" id="resultActions" style="display:none;">
+              <button class="btn secondary" id="saveBtn" type="button">Save bank</button>
+            </div>
+          </div>
+          <div id="alertBox"></div>
+          <div id="results">
+            <div class="placeholder">
+              <div>
+                <div class="big">📝</div>
+                <div>Generated assessment items will appear here.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let current = null; // { topic, standard, itemType, items }
+
+    function toast(msg, isError) {
+      const t = $('toast');
+      t.textContent = msg;
+      t.className = 'toast show' + (isError ? ' error' : '');
+      setTimeout(() => (t.className = 'toast'), 2600);
+    }
+    function showAlert(msg) {
+      $('alertBox').innerHTML = msg ? `<div class="alert">${escapeHtml(msg)}</div>` : '';
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function renderItems(data) {
+      const { items } = data;
+      const suffix = data.model ? ' · ' + data.model : '';
+      $('resultCount').textContent = items.length + ' item' + (items.length === 1 ? '' : 's') + suffix;
+      $('resultActions').style.display = items.length ? 'flex' : 'none';
+      if (!items.length) {
+        $('results').innerHTML = '<div class="empty">No items returned. Try a different topic.</div>';
+        return;
+      }
+      $('results').innerHTML = items.map((it, i) => {
+        const diff = ['easy', 'medium', 'hard'].includes(it.difficulty) ? it.difficulty : 'medium';
+        const opts = (it.options || []).map((o) => {
+          const correct = it.answer && o.trim() === it.answer.trim();
+          return `<li class="${correct ? 'correct' : ''}">${escapeHtml(o)}</li>`;
+        }).join('');
+        return `
+          <div class="item">
+            <div class="item-top">
+              <div class="item-num">${i + 1}</div>
+              <span class="badge type">${escapeHtml(it.type || 'item')}</span>
+              <span class="badge ${diff}">${diff}</span>
+              ${it.standard ? `<span class="badge std">${escapeHtml(it.standard)}</span>` : ''}
+            </div>
+            <p class="item-stem">${escapeHtml(it.stem)}</p>
+            ${opts ? `<ul class="options">${opts}</ul>` : ''}
+            <div class="answer-key"><b>Answer key:</b> ${escapeHtml(it.answer || '—')}</div>
+            ${it.rationale ? `<div class="rationale">${escapeHtml(it.rationale)}</div>` : ''}
+          </div>`;
+      }).join('');
+    }
+
+    async function generate(e) {
+      e.preventDefault();
+      showAlert('');
+      const topic = $('topic').value.trim();
+      if (!topic) { toast('Enter a topic first', true); return; }
+      const payload = {
+        topic,
+        standard: $('standard').value.trim(),
+        itemType: $('itemType').value,
+        count: parseInt($('count').value, 10),
+        provider: $('provider').value || undefined,
+      };
+      const btn = $('genBtn');
+      btn.disabled = true;
+      $('genLabel').innerHTML = '<span class="spinner"></span>';
+      $('results').innerHTML = '<div class="placeholder"><div><div class="spinner" style="border-color:rgba(25,118,210,.25);border-top-color:var(--accent);width:28px;height:28px;margin:0 auto 10px;"></div>Generating aligned items…</div></div>';
+      try {
+        const res = await fetch('/api/assessbank', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Generation failed');
+        current = data;
+        renderItems(data);
+      } catch (err) {
+        current = null;
+        $('resultActions').style.display = 'none';
+        $('resultCount').textContent = '';
+        $('results').innerHTML = '<div class="placeholder"><div><div class="big">⚠️</div>Something went wrong.</div></div>';
+        showAlert(err.message);
+      } finally {
+        btn.disabled = false;
+        $('genLabel').textContent = 'Generate items';
+      }
+    }
+
+    async function saveBank() {
+      if (!current || !current.items.length) return;
+      const name = prompt('Name this item bank:', current.topic || 'Untitled bank');
+      if (name === null) return;
+      const btn = $('saveBtn');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      try {
+        const res = await fetch('/api/assessbank/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...current, name }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Save failed');
+        toast('Bank saved');
+        loadBanks();
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Save bank';
+      }
+    }
+
+    function fmtDate(s) {
+      if (!s) return '';
+      const d = new Date(s);
+      return isNaN(d) ? '' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    async function loadBanks() {
+      try {
+        const res = await fetch('/api/assessbank/banks');
+        const data = await res.json();
+        const banks = data.banks || [];
+        if (!banks.length) {
+          $('banksList').innerHTML = '<div class="empty">No saved banks yet.</div>';
+          return;
+        }
+        $('banksList').innerHTML = banks.map((b) => `
+          <div class="bank">
+            <div class="bank-icon">🗂️</div>
+            <div class="bank-info">
+              <div class="bank-name">${escapeHtml(b.name)}</div>
+              <div class="bank-meta">${b.itemCount} items · ${fmtDate(b.savedAt)}</div>
+            </div>
+            <button class="btn ghost" data-id="${escapeHtml(b.id)}">Open</button>
+          </div>`).join('');
+        $('banksList').querySelectorAll('button[data-id]').forEach((btn) =>
+          btn.addEventListener('click', () => openBank(btn.dataset.id)));
+      } catch (err) {
+        $('banksList').innerHTML = '<div class="empty">Could not load saved banks.</div>';
+      }
+    }
+
+    async function openBank(id) {
+      try {
+        const res = await fetch('/api/assessbank/banks/' + encodeURIComponent(id));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Load failed');
+        current = data;
+        $('topic').value = data.topic || '';
+        $('standard').value = data.standard || '';
+        showAlert('');
+        renderItems(data);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        toast('Loaded "' + (data.name || 'bank') + '"');
+      } catch (err) {
+        toast(err.message, true);
+      }
+    }
+
+    async function loadConfig() {
+      const sel = $('provider');
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        const providers = cfg.providers || [];
+        if (!providers.length) {
+          sel.innerHTML = '<option value="">No provider configured</option>';
+          sel.disabled = true;
+          showAlert('No LLM provider is configured on the server. Set LLM_PROVIDER and the matching API key.');
+          return;
+        }
+        sel.innerHTML = providers.map((p) =>
+          `<option value="${escapeHtml(p.id)}"${p.id === cfg.defaultProvider ? ' selected' : ''}>` +
+          `${escapeHtml(p.label)} — ${escapeHtml(p.model)}</option>`).join('');
+        sel.disabled = false;
+      } catch (err) {
+        sel.innerHTML = '<option value="">Default provider</option>';
+      }
+    }
+
+    $('genForm').addEventListener('submit', generate);
+    $('saveBtn').addEventListener('click', saveBank);
+    $('refreshBanks').addEventListener('click', loadBanks);
+    loadConfig();
+    loadBanks();
+  </script>
+</body>
+</html>
