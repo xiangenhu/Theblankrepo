@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <link rel="icon" type="image/png" href="https://z-cdn.chatglm.cn/z-ai/static/logo.svg" />
   <title>AssessBank — AI Assessment Item Generator</title>
+  <!-- Bug reporter: load first so it captures errors from the rest of the page. -->
+  <script src="/bugReporter.js"></script>
   <style>
     :root {
       --bg: #f4f6f8;
@@ -181,6 +183,57 @@
       background: var(--red-soft); color: var(--red); border: 1px solid #f3c9c3;
       border-radius: 10px; padding: 12px 14px; font-size: 13.5px; margin-bottom: 14px;
     }
+
+    /* Student mode overlay */
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 60; display: none;
+      background: rgba(16,24,40,.5); padding: 24px; overflow-y: auto;
+    }
+    .modal-overlay.show { display: block; }
+    .modal {
+      max-width: 760px; margin: 24px auto; background: var(--surface);
+      border-radius: var(--radius); box-shadow: var(--shadow-lg); overflow: hidden;
+    }
+    .modal-head {
+      display: flex; align-items: center; gap: 12px; padding: 16px 22px;
+      border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface);
+    }
+    .modal-head h2 { margin: 0; font-size: 16px; }
+    .modal-head .sub { color: var(--muted); font-size: 13px; }
+    .modal-close {
+      margin-left: auto; border: none; background: transparent; font-size: 24px;
+      line-height: 1; color: var(--muted); cursor: pointer; padding: 0 4px;
+    }
+    .modal-body { padding: 22px; }
+    .q-progress { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    .opt {
+      display: flex; gap: 10px; align-items: flex-start; padding: 10px 13px; margin-bottom: 8px;
+      border: 1px solid var(--border); border-radius: 10px; cursor: pointer; font-size: 14px;
+      transition: border-color .12s, background .12s;
+    }
+    .opt:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .opt.selected { border-color: var(--accent); background: var(--accent-soft); }
+    .opt input { width: auto; margin-top: 3px; }
+    .opt.correct { background: var(--green-soft); border-color: #bfe5cf; }
+    .opt.incorrect { background: var(--red-soft); border-color: #f3c9c3; }
+    .verdict { font-size: 13px; font-weight: 700; margin-top: 8px; }
+    .verdict.ok { color: var(--green); }
+    .verdict.no { color: var(--red); }
+    .score-card {
+      text-align: center; padding: 22px; border: 1px solid var(--border);
+      border-radius: 12px; background: #f8fafc; margin-bottom: 20px;
+    }
+    .score-card .pct { font-size: 40px; font-weight: 800; color: var(--accent); }
+    .score-card .frac { color: var(--muted); font-size: 14px; }
+    /* One-at-a-time stepper */
+    .quiz-bar { height: 6px; background: var(--accent-soft); border-radius: 999px; overflow: hidden; margin-bottom: 18px; }
+    .quiz-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width .25s ease; }
+    .opt[role="button"]:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .opt.correct::after { content: "✓"; margin-left: auto; color: var(--green); font-weight: 800; }
+    .opt.incorrect::after { content: "✗"; margin-left: auto; color: var(--red); font-weight: 800; }
+    .rationale { color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .quiz-nav { display: flex; align-items: center; gap: 12px; margin-top: 22px; }
+    .quiz-score { color: var(--muted); font-size: 13px; }
   </style>
 </head>
 <body>
@@ -256,6 +309,7 @@
             <h2>Results</h2>
             <span class="count" id="resultCount"></span>
             <div class="results-actions" id="resultActions" style="display:none;">
+              <button class="btn secondary" id="takeBtn" type="button">▶ Take as student</button>
               <button class="btn secondary" id="saveBtn" type="button">Save bank</button>
             </div>
           </div>
@@ -272,6 +326,20 @@
       </section>
     </div>
   </main>
+
+  <!-- Student mode overlay -->
+  <div class="modal-overlay" id="studentModal" aria-hidden="true">
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <h2 id="smTitle">Take assessment</h2>
+          <div class="sub" id="smSub"></div>
+        </div>
+        <button class="modal-close" id="smClose" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body" id="smBody"></div>
+    </div>
+  </div>
 
   <div class="toast" id="toast"></div>
 
@@ -407,10 +475,13 @@
               <div class="bank-name">${escapeHtml(b.name)}</div>
               <div class="bank-meta">${b.itemCount} items · ${fmtDate(b.savedAt)}</div>
             </div>
+            <button class="btn ghost" data-take="${escapeHtml(b.id)}">Take</button>
             <button class="btn ghost" data-id="${escapeHtml(b.id)}">Open</button>
           </div>`).join('');
         $('banksList').querySelectorAll('button[data-id]').forEach((btn) =>
           btn.addEventListener('click', () => openBank(btn.dataset.id)));
+        $('banksList').querySelectorAll('button[data-take]').forEach((btn) =>
+          btn.addEventListener('click', () => takeBank(btn.dataset.take)));
       } catch (err) {
         $('banksList').innerHTML = '<div class="empty">Could not load saved banks.</div>';
       }
@@ -454,8 +525,313 @@
       }
     }
 
+    // -----------------------------------------------------------------------
+    // Student mode — deliver a bank to a learner and log every interaction to
+    // the LRS via POST /api/xapi/interaction. Identity is client-supplied.
+    // -----------------------------------------------------------------------
+    let quiz = null; // { ctx, items, actor:{learner}, answered:Set, viewed:Set, observer }
+
+    function uuid() {
+      try { return crypto.randomUUID(); }
+      catch { return 'a-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10); }
+    }
+
+    // Fire-and-forget: telemetry must never block or break the student's flow.
+    function logEvents(events) {
+      if (!quiz || !events.length) return;
+      const payload = { learner: quiz.learner, context: quiz.ctx, events };
+      try {
+        const blob = JSON.stringify(payload);
+        // sendBeacon survives page unload; fall back to fetch otherwise.
+        if (navigator.sendBeacon &&
+            navigator.sendBeacon('/api/xapi/interaction', new Blob([blob], { type: 'application/json' }))) {
+          return;
+        }
+      } catch {}
+      fetch('/api/xapi/interaction', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload), keepalive: true,
+      }).catch(() => {});
+    }
+
+    function isObjective(it) {
+      const t = (it.type || '').toLowerCase();
+      return t.includes('choice') || t.includes('true');
+    }
+    function gradeItem(it, response) {
+      const ans = (it.answer || '').trim().toLowerCase();
+      const r = (response || '').trim().toLowerCase();
+      if (!ans) return null;                 // no key -> undeterminable
+      if (isObjective(it)) return r === ans;
+      const t = (it.type || '').toLowerCase();
+      if (t.includes('short')) return r === ans; // exact-ish for short answer
+      return null;                           // essay -> human-graded, omit success
+    }
+
+    function closeStudent() {
+      if (quiz && quiz.observer) quiz.observer.disconnect();
+      quiz = null;
+      $('studentModal').classList.remove('show');
+      $('studentModal').setAttribute('aria-hidden', 'true');
+    }
+
+    function openStudentStart(bank) {
+      const m = $('studentModal');
+      $('smTitle').textContent = 'Take: ' + (bank.name || bank.topic || 'Assessment');
+      $('smSub').textContent = (bank.items || []).length + ' question' + (bank.items.length === 1 ? '' : 's');
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem('assessbank.learner') || '{}'); } catch {}
+      $('smBody').innerHTML = `
+        <p class="hint" style="margin-top:0;">Enter your details so your responses can be recorded, then start.</p>
+        <label for="smName">Your name</label>
+        <input id="smName" value="${escapeHtml(saved.name || '')}" placeholder="Jane Student" />
+        <label for="smEmail">Email</label>
+        <input id="smEmail" type="email" value="${escapeHtml(saved.email || '')}" placeholder="jane@school.edu" />
+        <label for="smId">Student ID (optional)</label>
+        <input id="smId" value="${escapeHtml(saved.id || '')}" placeholder="e.g. 100245" />
+        <button class="btn" id="smStart" type="button">Start assessment</button>`;
+      m.classList.add('show');
+      m.setAttribute('aria-hidden', 'false');
+      $('smStart').addEventListener('click', () => startAttempt(bank));
+    }
+
+    function startAttempt(bank) {
+      const learner = {
+        name: $('smName').value.trim(),
+        email: $('smEmail').value.trim(),
+        id: $('smId').value.trim(),
+      };
+      if (!learner.name && !learner.email && !learner.id) {
+        toast('Enter at least your name or email', true); return;
+      }
+      try { localStorage.setItem('assessbank.learner', JSON.stringify(learner)); } catch {}
+
+      quiz = {
+        learner,
+        ctx: {
+          attemptId: uuid(),
+          bankId: bank.id || '',
+          bankName: bank.name || '',
+          topic: bank.topic || '',
+          standard: bank.standard || '',
+        },
+        items: bank.items || [],
+        responses: new Array((bank.items || []).length).fill(''),
+        checked: new Array((bank.items || []).length).fill(false),
+        idx: 0,
+        viewed: new Set(),
+        observer: null,
+      };
+
+      logEvents([{ type: 'attempt-started', timestamp: new Date().toISOString() }]);
+      renderQuiz();
+    }
+
+    // Persist any in-progress free-text answer before navigating away, without
+    // marking it checked (so leaving a question mid-edit doesn't grade it).
+    function saveDraft() {
+      const ta = $('input-' + quiz.idx);
+      if (ta) quiz.responses[quiz.idx] = ta.value.trim();
+    }
+
+    // Render exactly ONE question (the current quiz.idx) with Back/Next nav.
+    function renderQuiz() {
+      const items = quiz.items;
+      const i = quiz.idx;
+      const it = items[i];
+      const total = items.length;
+
+      // Log the first view of this question (no scroll observer in stepper mode).
+      if (!quiz.viewed.has(i)) {
+        quiz.viewed.add(i);
+        logEvents([{
+          type: 'item-viewed', itemIndex: i, stem: it.stem,
+          itemType: it.type, options: it.options, timestamp: new Date().toISOString(),
+        }]);
+      }
+
+      const hasOptions = (it.options || []).length > 0;
+      const response = quiz.responses[i];
+      const checked = quiz.checked[i];
+      const verdict = checked ? gradeItem(it, response) : null;
+
+      let body;
+      if (hasOptions) {
+        body = `<div>${it.options.map((o, oi) => {
+          const v = escapeHtml(o);
+          const isSel = o === response;
+          const isCorrect = it.answer && o.trim() === it.answer.trim();
+          let cls = 'opt';
+          if (checked) { if (isCorrect) cls += ' correct'; else if (isSel) cls += ' incorrect'; }
+          else if (isSel) cls += ' selected';
+          return `<div class="${cls}" data-oi="${oi}" role="button" tabindex="0">${v}</div>`;
+        }).join('')}</div>`;
+      } else {
+        const big = (it.type || '').toLowerCase().includes('essay');
+        body = `<textarea id="input-${i}" rows="${big ? 6 : 3}" placeholder="Type your answer…">${escapeHtml(response || '')}</textarea>
+          <button class="btn secondary" id="smCheck" type="button" style="width:auto;margin-top:10px;">Check answer</button>`;
+      }
+
+      let feedback = '';
+      if (checked) {
+        if (typeof verdict === 'boolean') {
+          feedback = `<div class="verdict ${verdict ? 'ok' : 'no'}">${verdict
+            ? '✓ Correct'
+            : '✗ Not quite — correct answer: ' + escapeHtml(it.answer || '—')}</div>`;
+        } else if (it.answer) {
+          feedback = `<div class="verdict" style="color:var(--muted);font-weight:600;">Model answer: ${escapeHtml(it.answer)}</div>`;
+        }
+        if (it.rationale) feedback += `<div class="rationale">${escapeHtml(it.rationale)}</div>`;
+      }
+
+      const isLast = i === total - 1;
+      $('smBody').innerHTML = `
+        <div class="q-progress">Question ${i + 1} of ${total}</div>
+        <div class="quiz-bar"><div class="quiz-bar-fill" style="width:${((i + 1) / total) * 100}%"></div></div>
+        <div class="item" data-idx="${i}">
+          <div class="item-top">
+            <span class="badge type">${escapeHtml(it.type || 'item')}</span>
+            ${it.standard ? `<span class="badge std">${escapeHtml(it.standard)}</span>` : ''}
+          </div>
+          <p class="item-stem">${escapeHtml(it.stem)}</p>
+          ${body}
+          ${feedback}
+        </div>
+        <div class="quiz-nav">
+          <button class="btn ghost" id="smPrev" type="button" ${i === 0 ? 'disabled' : ''}>← Back</button>
+          <span class="quiz-score" id="smRunscore"></span>
+          <button class="btn" id="smNext" type="button" style="width:auto;margin-top:0;margin-left:auto;">${isLast ? 'Finish' : 'Next →'}</button>
+        </div>`;
+
+      // Running score across auto-graded questions answered so far.
+      let grad = 0, corr = 0;
+      quiz.checked.forEach((c, k) => {
+        if (!c) return;
+        const v = gradeItem(quiz.items[k], quiz.responses[k]);
+        if (typeof v === 'boolean') { grad++; if (v) corr++; }
+      });
+      $('smRunscore').textContent = grad ? `${corr}/${grad} correct so far` : '';
+
+      // Answer an objective item -> immediate feedback. Re-clicking redoes it.
+      if (hasOptions) {
+        $('smBody').querySelectorAll('.opt[data-oi]').forEach((el) => {
+          const choose = () => {
+            quiz.responses[i] = it.options[Number(el.dataset.oi)];
+            quiz.checked[i] = true;
+            recordAnswer(i, quiz.responses[i]);
+            renderQuiz();
+          };
+          el.addEventListener('click', choose);
+          el.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); }
+          });
+        });
+      } else {
+        $('smCheck').addEventListener('click', () => {
+          quiz.responses[i] = ($('input-' + i).value || '').trim();
+          quiz.checked[i] = true;
+          recordAnswer(i, quiz.responses[i]);
+          renderQuiz();
+        });
+      }
+
+      $('smPrev').addEventListener('click', () => {
+        saveDraft();
+        if (quiz.idx > 0) { quiz.idx--; renderQuiz(); }
+      });
+      $('smNext').addEventListener('click', () => {
+        saveDraft();
+        if (isLast) finishAttempt();
+        else { quiz.idx++; renderQuiz(); }
+      });
+    }
+
+    function recordAnswer(i, response) {
+      const it = quiz.items[i];
+      const correct = gradeItem(it, response);
+      logEvents([{
+        type: 'item-answered', itemIndex: i, stem: it.stem, itemType: it.type,
+        options: it.options, response,
+        ...(typeof correct === 'boolean' ? { correct } : {}),
+        timestamp: new Date().toISOString(),
+      }]);
+    }
+
+    function finishAttempt() {
+      if (quiz.observer) quiz.observer.disconnect();
+      const items = quiz.items;
+      let gradable = 0, correctCount = 0;
+      const verdicts = items.map((it, i) => {
+        const v = gradeItem(it, quiz.responses[i]);
+        if (typeof v === 'boolean') { gradable++; if (v) correctCount++; }
+        return v;
+      });
+      const scaled = gradable ? correctCount / gradable : undefined;
+
+      logEvents([{
+        type: 'attempt-completed',
+        score: gradable ? { scaled, raw: correctCount, max: gradable } : undefined,
+        ...(gradable ? { correct: correctCount === gradable } : {}),
+        timestamp: new Date().toISOString(),
+      }]);
+
+      renderResults(verdicts, correctCount, gradable);
+    }
+
+    function renderResults(verdicts, correctCount, gradable) {
+      const items = quiz.items;
+      const pct = gradable ? Math.round((correctCount / gradable) * 100) : null;
+      $('smTitle').textContent = 'Your results';
+      $('smBody').innerHTML = `
+        ${gradable ? `<div class="score-card">
+          <div class="pct">${pct}%</div>
+          <div class="frac">${correctCount} of ${gradable} auto-graded question${gradable === 1 ? '' : 's'} correct</div>
+        </div>` : '<p class="hint">Your responses were recorded. These questions are reviewed by your instructor.</p>'}
+        ${items.map((it, i) => {
+          const v = verdicts[i];
+          const resp = quiz.responses[i] || '—';
+          const opts = (it.options || []).map((o) => {
+            const correct = it.answer && o.trim() === it.answer.trim();
+            const chosen = o === quiz.responses[i];
+            const cls = correct ? 'correct' : (chosen ? 'incorrect' : '');
+            return `<div class="opt ${cls}" style="cursor:default;">${escapeHtml(o)}${chosen ? ' &nbsp;<b>(your answer)</b>' : ''}</div>`;
+          }).join('');
+          return `
+            <div class="item" id="r-${i}">
+              <div class="item-top"><div class="item-num">${i + 1}</div>
+                <span class="badge type">${escapeHtml(it.type || 'item')}</span></div>
+              <p class="item-stem">${escapeHtml(it.stem)}</p>
+              ${opts || `<div class="answer-key"><b>Your answer:</b> ${escapeHtml(resp)}</div>`}
+              ${typeof v === 'boolean'
+                ? `<div class="verdict ${v ? 'ok' : 'no'}">${v ? '✓ Correct' : '✗ Incorrect'}</div>`
+                : ''}
+            </div>`;
+        }).join('')}
+        <button class="btn" id="smDone" type="button">Done</button>`;
+      $('smDone').addEventListener('click', closeStudent);
+    }
+
+    async function takeBank(id) {
+      try {
+        const res = await fetch('/api/assessbank/banks/' + encodeURIComponent(id));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Load failed');
+        openStudentStart(data);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    }
+
     $('genForm').addEventListener('submit', generate);
     $('saveBtn').addEventListener('click', saveBank);
+    $('takeBtn').addEventListener('click', () => {
+      if (!current || !current.items.length) { toast('Generate or open a bank first', true); return; }
+      openStudentStart(current);
+    });
+    $('smClose').addEventListener('click', closeStudent);
+    $('studentModal').addEventListener('click', (e) => {
+      if (e.target === $('studentModal')) closeStudent();
+    });
     $('refreshBanks').addEventListener('click', loadBanks);
     loadConfig();
     loadBanks();

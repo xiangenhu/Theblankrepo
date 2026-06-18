@@ -70,6 +70,11 @@ web_modules/
 .env.*
 !.env.example
 
+# Bug triage — generated report (ephemeral) + local-dev fix-log fallback
+# (the canonical fix log lives in GCS: cache/bugfix/log.json)
+bug-triage-report.md
+bug-fix-log.json
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

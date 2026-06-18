@@ -21,6 +21,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
+const bugReporter = require('./bugReporter');
+
+// Capture process-level errors + intercept console as early as possible, so a
+// crash during startup is still reported. No-ops if BUG_LRS is unconfigured.
+bugReporter.attachProcessHandlers();
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -306,35 +311,29 @@ const LRS_USERNAME = env.LRS_USERNAME || env.LRS_KEY;
 const LRS_PASSWORD = env.LRS_PASSWORD || env.LRS_SECRET;
 const lrsEnabled = Boolean(LRS_ENDPOINT && LRS_USERNAME && LRS_PASSWORD);
 
+const XAPI_HOME = 'https://assessbank.app';
+
+// Verb taxonomy — no fallback. Emitting a verb outside this map is a bug, so we
+// throw rather than silently polluting the LRS. Mirrors the team-xapi runtime.
+const XAPI_VERBS = {
+  generated: { id: 'http://activitystrea.ms/schema/1.0/generate', display: 'generated' },
+  saved: { id: 'http://activitystrea.ms/schema/1.0/save', display: 'saved' },
+  attempted: { id: 'http://adlnet.gov/expapi/verbs/attempted', display: 'attempted' },
+  viewed: { id: 'http://id.tincanapi.com/verb/viewed', display: 'viewed' },
+  experienced: { id: 'http://adlnet.gov/expapi/verbs/experienced', display: 'experienced' },
+  answered: { id: 'http://adlnet.gov/expapi/verbs/answered', display: 'answered' },
+  completed: { id: 'http://adlnet.gov/expapi/verbs/completed', display: 'completed' },
+};
+
 /**
- * Best-effort send of an xAPI statement. Never throws — telemetry must not
- * break the primary request flow.
+ * Best-effort POST of a fully-formed xAPI statement to the LRS. Never throws —
+ * telemetry must not break the primary request flow. Returns true on success.
  */
-async function sendXapiStatement(verb, objectName, extra = {}) {
-  if (!lrsEnabled) return;
+async function postStatement(statement) {
+  if (!lrsEnabled) return false;
   try {
     const auth =
       'Basic ' + Buffer.from(`${LRS_USERNAME}:${LRS_PASSWORD}`).toString('base64');
-    const statement = {
-      actor: {
-        objectType: 'Agent',
-        name: 'AssessBank Instructor',
-        account: { homePage: 'https://assessbank.app', name: 'instructor' },
-      },
-      verb: {
-        id: `http://adlnet.gov/expapi/verbs/${verb}`,
-        display: { 'en-US': verb },
-      },
-      object: {
-        objectType: 'Activity',
-        id: `https://assessbank.app/xapi/${encodeURIComponent(objectName)}`,
-        definition: {
-          name: { 'en-US': objectName },
-          extensions: extra,
-        },
-      },
-      timestamp: new Date().toISOString(),
-    };
     const url = LRS_ENDPOINT.replace(/\/+$/, '') + '/statements';
     const res = await fetch(url, {
       method: 'POST',
@@ -347,9 +346,164 @@ async function sendXapiStatement(verb, objectName, extra = {}) {
     });
     if (!res.ok) {
       console.warn(`[xapi] LRS responded ${res.status}`);
+      return false;
     }
+    return true;
   } catch (err) {
     console.warn(`[xapi] failed to send statement: ${err.message}`);
+    return false;
+  }
+}
+
+function xapiVerb(verb) {
+  const v = XAPI_VERBS[verb];
+  if (!v) throw new Error(`[xapi] verb "${verb}" not in taxonomy`);
+  return { id: v.id, display: { 'en-US': v.display } };
+}
+
+/**
+ * Instructor-side telemetry (item generation, bank saves). The instructor is a
+ * single well-known account; learner statements use buildLearnerActor instead.
+ */
+async function sendXapiStatement(verb, objectName, extra = {}) {
+  if (!lrsEnabled) return;
+  await postStatement({
+    actor: {
+      objectType: 'Agent',
+      name: 'AssessBank Instructor',
+      account: { homePage: XAPI_HOME, name: 'instructor' },
+    },
+    verb: xapiVerb(verb),
+    object: {
+      objectType: 'Activity',
+      id: `${XAPI_HOME}/xapi/${encodeURIComponent(objectName)}`,
+      definition: { name: { 'en-US': objectName }, extensions: extra },
+    },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Learner interaction tracking (student answers) -> LRS
+// ---------------------------------------------------------------------------
+// Identity is client-supplied (no auth layer yet). Prefer an email-based mbox
+// when present; otherwise fall back to an account on our homePage, and finally
+// to an anonymous account so an attempt is still coherent via `registration`.
+function buildLearnerActor(learner = {}) {
+  const name = String(learner.name || '').trim();
+  const email = String(learner.email || '').trim();
+  const id = String(learner.id || '').trim();
+  const actor = { objectType: 'Agent' };
+  if (name) actor.name = name;
+  if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    actor.mbox = `mailto:${email}`;
+  } else {
+    actor.account = { homePage: XAPI_HOME, name: id || email || 'anonymous-learner' };
+  }
+  return actor;
+}
+
+// The quiz/attempt as an xAPI Activity. A saved bank has a stable id; an unsaved
+// in-memory bank falls back to the attempt registration so statements still group.
+function quizActivityId(ctx = {}) {
+  const bankId = String(ctx.bankId || '').trim();
+  if (bankId) return `${XAPI_HOME}/xapi/bank/${encodeURIComponent(bankId)}`;
+  return `${XAPI_HOME}/xapi/attempt/${encodeURIComponent(String(ctx.attemptId || 'unknown'))}`;
+}
+
+function quizObject(ctx = {}) {
+  return {
+    objectType: 'Activity',
+    id: quizActivityId(ctx),
+    definition: {
+      type: 'http://adlnet.gov/expapi/activities/assessment',
+      name: { 'en-US': String(ctx.bankName || ctx.topic || 'Assessment').slice(0, 250) },
+      ...(ctx.topic ? { description: { 'en-US': String(ctx.topic).slice(0, 500) } } : {}),
+    },
+  };
+}
+
+// A single item as a cmi.interaction Activity, nested under the quiz id so the
+// LRS can relate item statements to their parent assessment.
+function itemObject(ctx = {}, ev = {}) {
+  const idx = Number.isFinite(ev.itemIndex) ? ev.itemIndex : 0;
+  const def = {
+    name: { 'en-US': String(ev.stem || `Item ${idx + 1}`).slice(0, 250) },
+    type: 'http://adlnet.gov/expapi/activities/cmi.interaction',
+  };
+  const t = String(ev.itemType || '').toLowerCase();
+  if (t.includes('multiple') || t.includes('choice')) {
+    def.interactionType = 'choice';
+    if (Array.isArray(ev.options) && ev.options.length) {
+      def.choices = ev.options.map((o, i) => ({
+        id: String(i),
+        description: { 'en-US': String(o).slice(0, 250) },
+      }));
+    }
+  } else if (t.includes('true')) {
+    def.interactionType = 'true-false';
+  } else {
+    def.interactionType = 'long-fill-in';
+  }
+  return {
+    objectType: 'Activity',
+    id: `${quizActivityId(ctx)}/item/${idx}`,
+    definition: def,
+  };
+}
+
+/**
+ * Map one client interaction event to a complete xAPI statement and POST it.
+ * `registration` (the attempt id) ties every statement in an attempt together.
+ */
+async function sendLearnerEvent(actor, ctx, ev) {
+  const reg = String(ctx.attemptId || '').trim();
+  const base = {
+    actor,
+    timestamp: ev.timestamp || new Date().toISOString(),
+    context: {
+      ...(reg ? { registration: reg } : {}),
+      contextActivities: { grouping: [{ objectType: 'Activity', id: quizActivityId(ctx) }] },
+    },
+  };
+
+  switch (ev.type) {
+    case 'attempt-started':
+      return postStatement({ ...base, verb: xapiVerb('attempted'), object: quizObject(ctx) });
+
+    case 'item-viewed':
+      return postStatement({ ...base, verb: xapiVerb('viewed'), object: itemObject(ctx, ev) });
+
+    case 'item-answered':
+      return postStatement({
+        ...base,
+        verb: xapiVerb('answered'),
+        object: itemObject(ctx, ev),
+        result: {
+          response: String(ev.response ?? '').slice(0, 2000),
+          ...(typeof ev.correct === 'boolean' ? { success: ev.correct } : {}),
+          completion: true,
+        },
+      });
+
+    case 'attempt-completed': {
+      const s = ev.score || {};
+      const result = { completion: true };
+      if (typeof ev.correct === 'boolean') result.success = ev.correct;
+      const scaled = Number(s.scaled);
+      const raw = Number(s.raw);
+      const max = Number(s.max);
+      const score = {};
+      if (Number.isFinite(scaled)) score.scaled = Math.max(0, Math.min(1, scaled));
+      if (Number.isFinite(raw)) score.raw = raw;
+      if (Number.isFinite(max)) score.max = max;
+      if (Object.keys(score).length) result.score = score;
+      return postStatement({ ...base, verb: xapiVerb('completed'), object: quizObject(ctx), result });
+    }
+
+    default:
+      console.warn(`[xapi] unknown learner event type: ${ev.type}`);
+      return false;
   }
 }
 
@@ -585,6 +739,113 @@ app.get('/api/assessbank/banks/:id', async (req, res) => {
   }
 });
 
+// Record student interactions with questions into the learning LRS. Accepts a
+// batch so the client can flush several events in one request. Identity is
+// client-supplied (see buildLearnerActor). Best-effort: a misconfigured or
+// flaky LRS never fails the student's attempt — we always 200 with a count.
+app.post('/api/xapi/interaction', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const learner = body.learner || {};
+    const ctx = body.context || {};
+    const events = Array.isArray(body.events)
+      ? body.events
+      : body.event
+        ? [body.event]
+        : [];
+
+    if (!lrsEnabled) {
+      return res.status(200).json({ recorded: 0, lrs: false });
+    }
+    if (!events.length) {
+      return res.status(400).json({ error: 'No events to record.' });
+    }
+
+    const actor = buildLearnerActor(learner);
+    // Cap the batch so a single request can't fan out unbounded LRS writes.
+    const batch = events.slice(0, 200);
+    const results = await Promise.all(
+      batch.map((ev) => sendLearnerEvent(actor, ctx, ev || {}).catch(() => false))
+    );
+    const recorded = results.filter(Boolean).length;
+    res.json({ recorded, total: batch.length, lrs: true });
+  } catch (err) {
+    console.error('[xapi] interaction error:', err.message);
+    // Telemetry must never surface as a hard error to the learner.
+    res.status(200).json({ recorded: 0, error: 'record_failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Bug telemetry (dedicated BUG_LRS — kept separate from the learning LRS)
+// ---------------------------------------------------------------------------
+
+/**
+ * Admin-only gate (deny by default). This app has no full auth layer yet, so we
+ * trust the identity header set by the OAuth proxy (OAUTH_PROXY_URL) and check
+ * it against ADMIN_EMAIL_WHITELIST. Role is enforced server-side, never from a
+ * client-asserted value. If the whitelist is empty or the email is absent, the
+ * request is denied. See _shared/roles.md.
+ */
+function requireAdmin(req, res, next) {
+  const whitelist = String(env.ADMIN_EMAIL_WHITELIST || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const email = String(
+    req.get('x-user-email') || req.get('x-forwarded-email') || ''
+  ).trim().toLowerCase();
+  if (!whitelist.length || !email || !whitelist.includes(email)) {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+  req.userEmail = email;
+  next();
+}
+
+// Public submit endpoint — the client (and only its own server) posts here.
+// Accepts a single report or a batch ({ reports: [...] }). Bug content is
+// UNTRUSTED input; it is redacted/pseudonymized server-side before forwarding.
+app.post('/bug-report', (req, res) => {
+  try {
+    const body = req.body || {};
+    const reports = Array.isArray(body.reports)
+      ? body.reports
+      : Array.isArray(body)
+        ? body
+        : [body];
+    const ids = [];
+    for (const r of reports.slice(0, 20)) {
+      const out = bugReporter.reportError({
+        source: 'client',
+        severity: r && r.severity,
+        message: r && r.message,
+        stack: r && r.stack,
+        route: r && r.route,
+        statusCode: r && r.statusCode,
+        component: r && r.component,
+        context: r && r.context,
+      });
+      if (out.errorId) ids.push(out.errorId);
+    }
+    res.json({ reported: ids.length > 0, errorIds: ids });
+  } catch (err) {
+    // Never let the telemetry endpoint itself become a source of errors.
+    res.json({ reported: false, errorIds: [] });
+  }
+});
+
+// Admin-only read endpoint — fetch + dedup + fix-log-joined view.
+app.get('/bug-reports', requireAdmin, async (req, res) => {
+  try {
+    const since = String(req.query.since || '7d');
+    const result = await bugReporter.fetchBugReports({ since });
+    res.json(result);
+  } catch (err) {
+    console.error('[bug-reports] error:', err.message);
+    res.status(500).json({ error: 'Failed to load bug reports.' });
+  }
+});
+
 // Health check for Cloud Run.
 app.get('/healthz', (req, res) => {
   const active = resolveProvider(null);
@@ -595,8 +856,13 @@ app.get('/healthz', (req, res) => {
     providers: configuredProviders().map((p) => p.id),
     storage: Boolean(bucket),
     lrs: lrsEnabled,
+    bugReporter: bugReporter.enabled,
   });
 });
+
+// Express error-handling middleware — MUST be last (after all routes). Reports
+// unhandled route errors to BUG_LRS, then responds. Never crashes the app.
+app.use(bugReporter.bugReporterMiddleware);
 
 app.listen(PORT, () => {
   const active = resolveProvider(null);
